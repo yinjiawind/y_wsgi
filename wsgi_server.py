@@ -158,7 +158,7 @@ class Connection(object):
         try:
             self.get_url_parameter()
             env = self.get_environ()
-            app_data = self.server.application(env, self.server.start_response)
+            app_data = self.server.application(env, self.start_response)
             self.server.response_data[self._fileno] = self.gen_response_data(app_data)
             del self.server.request_data[self._fileno]
             self.server.epoll.modify(self._fileno, select.EPOLLOUT)
@@ -204,13 +204,21 @@ class Connection(object):
         return env
 
     def gen_response_data(self, app_data):
-        response = 'HTTP/1.1 {status}\r\n'.format(status=self.server.status)
-        for header in self.server.headers:
+        response = 'HTTP/1.1 {status}\r\n'.format(status=self.status)
+        for header in self.headers:
             response += '{0}: {1}\r\n'.format(*header)
         response += '\r\n'
         for data in app_data:
             response += data
         return response
+
+    def start_response(self, status, response_headers):
+        headers = [
+            ('Date', datetime.datetime.now().strftime('%a, %d %b %Y %H:%M:%S GMT')),
+            ('Server', 'EWSGI0.1'),
+        ]
+        self.headers = response_headers + headers
+        self.status = status
 
 class WSGIServer(object):
     def __init__(self, server_address, application):
@@ -264,14 +272,6 @@ class WSGIServer(object):
             self.epoll.unregister(self.serversocket.fileno())
             self.epoll.close()
             self.serversocket.close()
-
-    def start_response(self, status, response_headers):
-        headers = [
-            ('Date', datetime.datetime.now().strftime('%a, %d %b %Y %H:%M:%S GMT')),
-            ('Server', 'EWSGI0.1'),
-        ]
-        self.headers = response_headers + headers
-        self.status = status
 
 def application(environ, start_response):
     status = '200 OK'
