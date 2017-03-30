@@ -6,6 +6,7 @@ import datetime
 import threading
 import time
 import Queue
+import errno
 
 import config
 
@@ -159,13 +160,15 @@ class Connection(object):
             self.get_url_parameter()
             env = self.get_environ()
             app_data = self.server.application(env, self.start_response)
-            self.server.response_data[self._fileno] = self.gen_response_data(app_data)
+        except Exception, e:
+            self.status = 500
+            app_data = None
+        finally:
+            self.server.response_data[self._fileno] = self.gen_response_data(self.status, app_data)
             del self.server.request_data[self._fileno]
             self.server.epoll.modify(self._fileno, select.EPOLLOUT)
             print '[{0}] "{1}" {2}'.format(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                                            self.request_lines[0], self.status)
-        except Exception, e:
-            pass
 
     def get_url_parameter(self):
         self.request_dict = {'Path': self.request_lines[0]}
@@ -203,13 +206,13 @@ class Connection(object):
         }
         return env
 
-    def gen_response_data(self, app_data):
-        response = 'HTTP/1.1 {status}\r\n'.format(status=self.status)
+    def gen_response_data(self, status, app_data=None):
+        response = 'HTTP/1.1 {status}\r\n'.format(status=status)
         for header in self.headers:
             response += '{0}: {1}\r\n'.format(*header)
         response += '\r\n'
-        for data in app_data:
-            response += data
+        if app_data:
+            response += app_data
         return response
 
     def start_response(self, status, response_headers):
@@ -253,11 +256,19 @@ class WSGIServer(object):
                         self.request_data[connection.fileno()] = b''
                         self.response_data[connection.fileno()] = b''
                     elif event & select.EPOLLIN:
-                        data = self.connections[fileno].recv(1024)
-                        self.request_data[fileno] += data
-                        if len(data) != 1024:
-                            conn = Connection(self, fileno)
-                            self.requests.put(conn)
+                        try:
+                            data = self.connections[fileno].recv(1024)
+                            self.request_data[fileno] += data
+                            if len(data) < 1024:
+                                conn = Connection(self, fileno)
+                                self.requests.put(conn)
+                        except socket.error, msg:
+                            if msg.errno == errno.EAGAIN:
+                                conn = Connection(self, fileno)
+                                self.requests.put(conn)
+                            else:
+                                self.epoll.unregister(fileno)
+                                self.connections[fileno].close()
                     elif event & select.EPOLLOUT:
                         byteswritten = self.connections[fileno].send(self.response_data[fileno])
                         self.response_data[fileno] = self.response_data[fileno][byteswritten:]
@@ -277,7 +288,7 @@ def application(environ, start_response):
     status = '200 OK'
     response_headers = [('Content-Type', 'text/plain')]
     start_response(status, response_headers)
-    return ['Hello world']
+    return 'Hello world'
 
 if __name__ == '__main__':
     server = WSGIServer(("0.0.0.0", 8888), application)
