@@ -153,9 +153,10 @@ class Connection(object):
     def __init__(self, server, fileno):
         self.server = server
         self._fileno = fileno
+        self._request_data = b''
 
     def handle_request(self):
-        self.request_lines = self.server.request_data[self._fileno].splitlines()
+        self.request_lines = self._request_data.splitlines()
         try:
             self.get_url_parameter()
             env = self.get_environ()
@@ -165,7 +166,6 @@ class Connection(object):
             app_data = None
         finally:
             self.server.response_data[self._fileno] = self.gen_response_data(self.status, app_data)
-            del self.server.request_data[self._fileno]
             self.server.epoll.modify(self._fileno, select.EPOLLOUT)
             print '[{0}] "{1}" {2}'.format(datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                                            self.request_lines[0], self.status)
@@ -223,6 +223,19 @@ class Connection(object):
         self.headers = response_headers + headers
         self.status = status
 
+    def read_request_data(self):
+        try:
+            data = self.server.connections[self._fileno].recv(1024)
+            self._request_data += data
+            if len(data) < 1024:
+                self.server.requests.put(self)
+        except socket.error, msg:
+            if msg.errno == errno.EAGAIN:
+                self.server.requests.put(self)
+            else:
+                self.server.epoll.unregister(self._fileno)
+                self.server.connections[self._fileno].close()
+
 class WSGIServer(object):
     def __init__(self, server_address, application):
         self.serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -238,7 +251,7 @@ class WSGIServer(object):
         self.port = port
         self.application = application
         self.connections = {}
-        self.request_data = {}
+        self.request_conns = {}
         self.response_data = {}
         self.requests = ThreadPool(self)
 
@@ -253,23 +266,12 @@ class WSGIServer(object):
                         connection.setblocking(0)
                         self.epoll.register(connection.fileno(), select.EPOLLIN)
                         self.connections[connection.fileno()] = connection
-                        self.request_data[connection.fileno()] = b''
+                        self.request_conns[connection.fileno()] = Connection(self, connection.fileno())
                         self.response_data[connection.fileno()] = b''
                     elif event & select.EPOLLIN:
-                        try:
-                            data = self.connections[fileno].recv(1024)
-                            self.request_data[fileno] += data
-                            if len(data) < 1024:
-                                conn = Connection(self, fileno)
-                                self.requests.put(conn)
-                        except socket.error, msg:
-                            if msg.errno == errno.EAGAIN:
-                                conn = Connection(self, fileno)
-                                self.requests.put(conn)
-                            else:
-                                self.epoll.unregister(fileno)
-                                self.connections[fileno].close()
+                        self.request_conns[fileno].read_request_data()
                     elif event & select.EPOLLOUT:
+                        del self.request_conns[fileno]
                         byteswritten = self.connections[fileno].send(self.response_data[fileno])
                         self.response_data[fileno] = self.response_data[fileno][byteswritten:]
                         if len(self.response_data[fileno]) == 0:
